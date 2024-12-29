@@ -13,3 +13,14 @@ add_executable(sensor-manager
 
 # 必要なら追加のインクルードディレクトリを設定
 target_include_directories(sensor-manager PRIVATE src/)
+
+# gpiodのインクルードディレクトリを設定
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBGPIO REQUIRED libgpiod)
+
+# gpiodライブラリをリンク
+target_link_libraries(sensor-manager PRIVATE ${LIBGPIO_LIBRARIES})
+
+# gpiodのインクルードパスを追加
+target_include_directories(sensor-manager PRIVATE ${LIBGPIO_INCLUDE_DIRS})
+
