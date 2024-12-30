@@ -1,139 +1,98 @@
 #include "sensor-manager.h"
+#include <sys/ioctl.h>
+#include <linux/i2c.h>
+#include <linux/i2c-dev.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <stdexcept>
 #include <iostream>
-#include <unistd.h> // for usleep
+#include <cstring>
 
-VCNL4040::VCNL4040(const char *chip_name) {
-    chip = gpiod_chip_open_by_name(chip_name);
-    if (!chip) {
-        perror("Failed to open GPIO chip");
-        exit(1);
-    }
+#define VCNL4040_ALS_CONF 0x00
+#define VCNL4040_I2C_ADDRESS 0x60
+#define VCNL4040_DEVICE_ID 0x0C
+#define VCNL4040_ALS_DATA 0x09
 
-    scl = gpiod_chip_get_line(chip, I2C_SCL_PIN);
-    sda = gpiod_chip_get_line(chip, I2C_SDA_PIN);
-
-    if (!scl || !sda) {
-        perror("Failed to get GPIO line");
-        exit(1);
-    }
-
-    if (gpiod_line_request_output(scl, "VCNL4040 SCL", 0) < 0 ||
-        gpiod_line_request_output(sda, "VCNL4040 SDA", 0) < 0) {
-        perror("Failed to set GPIO lines to output");
-        exit(1);
-    }
-
-    if (gpiod_line_set_flags(scl, GPIOD_LINE_REQUEST_FLAG_BIAS_PULL_UP) < 0 ||
-        gpiod_line_set_flags(sda, GPIOD_LINE_REQUEST_FLAG_BIAS_PULL_UP) < 0) {
-        perror("Failed to set pull-up bias");
-        exit(1);
+SensorManager::SensorManager(const char *i2c_device) {
+    fd = open(i2c_device, O_RDWR);
+    if (fd < 0) {
+        perror("Failed to open I2C device");
+        throw std::runtime_error("I2C device open error");
     }
 }
 
-VCNL4040::~VCNL4040() {
-    gpiod_line_release(scl);
-    gpiod_line_release(sda);
-    gpiod_chip_close(chip);
-}
-
-void VCNL4040::delay() {
-    usleep(5); // I2C timing: 約5μs
-}
-
-void VCNL4040::set_line(struct gpiod_line *line, int value) {
-    if (gpiod_line_set_value(line, value) < 0) {
-        perror("Failed to set GPIO line value");
-        exit(1);
+SensorManager::~SensorManager() {
+    if (fd >= 0) {
+        close(fd);
     }
 }
 
-int VCNL4040::read_line(struct gpiod_line *line) {
-    int value = gpiod_line_get_value(line);
-    if (value < 0) {
-        perror("Failed to read GPIO line value");
-        exit(1);
+uint16_t SensorManager::readDeviceID() {
+    return readRegister(VCNL4040_DEVICE_ID);
+}
+
+float SensorManager::readAmbientLight() {
+    uint16_t raw_light = readRegister(VCNL4040_ALS_DATA);
+    
+    // デバッグ出力
+    std::cout << "Raw ALS: 0x" << std::hex << raw_light 
+              << " (" << std::dec << raw_light << ")" << std::endl;
+    
+    // 0.01 lux/step変換
+    float lux = raw_light * 0.1;
+    // std::cout << "Ambient Light: " << lux << " Lux" << std::endl;
+    
+    return lux;
+}
+
+uint16_t SensorManager::SetALSConfig(uint8_t cmd) {
+    return writeRegister(VCNL4040_ALS_CONF, cmd, 0x00);
+}
+
+uint16_t SensorManager::readRegister(uint8_t reg_addr) {
+    uint8_t buffer[2];
+    struct i2c_msg messages[] = {
+      { VCNL4040_I2C_ADDRESS, 0, 1, &reg_addr },      /* レジスタアドレスをセット. */
+      { VCNL4040_I2C_ADDRESS, I2C_M_RD, 2, buffer },  /* dataにlengthバイト読み込む. */
+    };
+    struct i2c_rdwr_ioctl_data ioctl_data = { messages, 2 };
+
+    /* I2C-Readを行う. */
+    if (ioctl(fd, I2C_RDWR, &ioctl_data) < 0) {
+        fprintf(stderr, "i2c_read: failed to ioctl: %s\n", strerror(errno));
+        close(fd);
+        return -1;
     }
-    return value;
+
+    // デバッグ出力
+    uint16_t data = (buffer[1] << 8) | buffer[0];
+    // std::cout << "Read data: 0x" << std::hex << data << std::endl;
+
+    // LSBとMSBを16ビット値に結合
+    return data;
 }
 
-void VCNL4040::i2c_start() {
-    set_line(sda, 1);
-    set_line(scl, 1);
-    delay();
-    set_line(sda, 0);
-    delay();
-    set_line(scl, 0);
-}
-
-void VCNL4040::i2c_stop() {
-    set_line(sda, 0);
-    set_line(scl, 1);
-    delay();
-    set_line(sda, 1);
-    delay();
-}
-
-void VCNL4040::i2c_write_bit(int bit) {
-    set_line(sda, bit);
-    delay();
-    set_line(scl, 1);
-    delay();
-    set_line(scl, 0);
-}
-
-int VCNL4040::i2c_read_bit() {
-    set_line(sda, 1); // SDA を入力モードに
-    delay();
-    set_line(scl, 1);
-    delay();
-    int bit = read_line(sda);
-    set_line(scl, 0);
-    return bit;
-}
-
-void VCNL4040::i2c_write_byte(uint8_t byte) {
-    for (int i = 7; i >= 0; --i) {
-        i2c_write_bit((byte >> i) & 0x01);
+uint16_t SensorManager::writeRegister(uint8_t reg_addr, uint8_t lsb, uint8_t msb) {
+    /* I2C-Write用のバッファを準備する. */
+    uint8_t buffer[3];
+    if (buffer == NULL) {
+        fprintf(stderr, "i2c_write: failed to memory allocate\n");
+        close(fd);
+        return -1;
     }
-    i2c_read_bit(); // ACK を読み取る
-}
+    buffer[0] = reg_addr;  // 1バイト目にレジスタアドレスをセット
+    buffer[1] = lsb;       // 2バイト目にLSBをセット
+    buffer[2] = msb;       // 3バイト目にMSBをセット
 
-uint8_t VCNL4040::i2c_read_byte(bool ack) {
-    uint8_t byte = 0;
-    for (int i = 7; i >= 0; --i) {
-        byte = (byte << 1) | i2c_read_bit();
+    /* I2C-Writeメッセージを作成する. */
+    struct i2c_msg message = { VCNL4040_I2C_ADDRESS, 0, 3, buffer };
+    struct i2c_rdwr_ioctl_data ioctl_data = { &message, 1 };
+
+    /* I2C-Writeを行う. */
+    if (ioctl(fd, I2C_RDWR, &ioctl_data) < 0) {
+        fprintf(stderr, "i2c_write: failed to ioctl: %s\n", strerror(errno));
+        close(fd);
+        return -1;
     }
-    i2c_write_bit(ack ? 0 : 1); // ACK を送信
-    return byte;
-}
-
-void VCNL4040::writeRegister(uint8_t reg, uint16_t value) {
-    i2c_start();
-    i2c_write_byte((VCNL4040_I2C_ADDRESS << 1) | 0); // 書き込みアドレス
-    i2c_write_byte(reg);
-    i2c_write_byte(value & 0xFF);     // LSB
-    i2c_write_byte((value >> 8) & 0xFF); // MSB
-    i2c_stop();
-}
-
-uint16_t VCNL4040::readRegister(uint8_t reg) {
-    i2c_start();
-    i2c_write_byte((VCNL4040_I2C_ADDRESS << 1) | 0); // 書き込みアドレス
-    i2c_write_byte(reg);
-    i2c_start();
-    i2c_write_byte((VCNL4040_I2C_ADDRESS << 1) | 1); // 読み取りアドレス
-    uint8_t lowByte = i2c_read_byte(true);
-    uint8_t highByte = i2c_read_byte(false);
-    i2c_stop();
-    return (highByte << 8) | lowByte;
-}
-
-void VCNL4040::configureSensor() {
-    // 照度測定を有効化する設定を送信
-    writeRegister(VCNL4040_AMBIENT_CONF_REG, 0x1000);
-    usleep(100000); // 設定が反映されるまで待機
-}
-
-uint16_t VCNL4040::readAmbientLight() {
-    return readRegister(VCNL4040_AMBIENT_LIGHT_REG);
+    return 0;
 }
