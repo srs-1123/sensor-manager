@@ -1,2 +1,4 @@
 /build
 send.sh
+Makefile
+/.vscode
