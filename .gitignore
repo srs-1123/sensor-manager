@@ -1,4 +1,5 @@
-/build
+build/
 send.sh
 Makefile
-/.vscode
+.vscode/
+bin/

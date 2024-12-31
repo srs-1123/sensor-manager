@@ -13,7 +13,7 @@
 #define VCNL4040_DEVICE_ID 0x0C
 #define VCNL4040_ALS_DATA 0x09
 
-SensorManager::SensorManager(const char *i2c_device) {
+VCNL4040Manager::VCNL4040Manager(const char *i2c_device) {
     fd = open(i2c_device, O_RDWR);
     if (fd < 0) {
         perror("Failed to open I2C device");
@@ -21,17 +21,17 @@ SensorManager::SensorManager(const char *i2c_device) {
     }
 }
 
-SensorManager::~SensorManager() {
+VCNL4040Manager::~VCNL4040Manager() {
     if (fd >= 0) {
         close(fd);
     }
 }
 
-uint16_t SensorManager::readDeviceID() {
+uint16_t VCNL4040Manager::readDeviceID() {
     return readRegister(VCNL4040_DEVICE_ID);
 }
 
-float SensorManager::readAmbientLight() {
+float VCNL4040Manager::readAmbientLight() {
     uint16_t raw_light = readRegister(VCNL4040_ALS_DATA);
     
     // デバッグ出力
@@ -45,11 +45,11 @@ float SensorManager::readAmbientLight() {
     return lux;
 }
 
-uint16_t SensorManager::SetALSConfig(uint8_t cmd) {
+uint16_t VCNL4040Manager::SetALSConfig(uint8_t cmd) {
     return writeRegister(VCNL4040_ALS_CONF, cmd, 0x00);
 }
 
-uint16_t SensorManager::readRegister(uint8_t reg_addr) {
+uint16_t VCNL4040Manager::readRegister(uint8_t reg_addr) {
     uint8_t buffer[2];
     struct i2c_msg messages[] = {
       { VCNL4040_I2C_ADDRESS, 0, 1, &reg_addr },      /* レジスタアドレスをセット. */
@@ -72,7 +72,7 @@ uint16_t SensorManager::readRegister(uint8_t reg_addr) {
     return data;
 }
 
-uint16_t SensorManager::writeRegister(uint8_t reg_addr, uint8_t lsb, uint8_t msb) {
+uint16_t VCNL4040Manager::writeRegister(uint8_t reg_addr, uint8_t lsb, uint8_t msb) {
     /* I2C-Write用のバッファを準備する. */
     uint8_t buffer[3];
     if (buffer == NULL) {
@@ -95,4 +95,32 @@ uint16_t SensorManager::writeRegister(uint8_t reg_addr, uint8_t lsb, uint8_t msb
         return -1;
     }
     return 0;
+}
+
+GPIOManager::GPIOManager(unsigned int line_num) {
+    const char* chipname = "gpiochip0";
+
+    chip = gpiod_chip_open_by_name(chipname);
+    if (!chip) {
+        throw std::runtime_error("GPIOチップを開けませんでした。");
+    }
+
+    line = gpiod_chip_get_line(chip, line_num);
+    if (!line) {
+        gpiod_chip_close(chip);
+        throw std::runtime_error("GPIOラインを取得できませんでした。");
+    }
+
+    if (gpiod_line_request_input(line, "gpio_reader") < 0) {
+        gpiod_chip_close(chip);
+        throw std::runtime_error("GPIOを入力モードでリクエストできませんでした。");
+    }
+}
+
+GPIOManager::~GPIOManager() {
+    gpiod_chip_close(chip);
+}
+
+uint16_t GPIOManager::getValue() {
+    return gpiod_line_get_value(line);
 }

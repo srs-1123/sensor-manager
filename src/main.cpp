@@ -3,10 +3,11 @@
 #include <unistd.h>
 
 int main() {
-    
+// #define VCNL4040
     try {
-        // SensorManagerクラスを初期化
-        SensorManager sensor("/dev/i2c-1"); // 使用するI2Cバスに応じて変更
+#if VCNL4040
+        // VCNL4040Managerクラスを初期化
+        VCNL4040Manager sensor("/dev/i2c-1"); // 使用するI2Cバスに応じて変更
 
         // デバイスID確認
         uint16_t device_id = sensor.readDeviceID();
@@ -31,10 +32,16 @@ int main() {
 
             sleep(1); // 1秒待機
         }
+#else 
+    GPIOManager sensor(17);
+    while (true) {
+        std::cout << "GPIO17 Value: " << sensor.getValue() << std::endl;
+        usleep(500000); // 500ms待機
+    }
+#endif
     } catch (const std::exception &e) {
         std::cerr << "Error: " << e.what() << std::endl;
         return 1;
     }
-
     return 0;
 }
